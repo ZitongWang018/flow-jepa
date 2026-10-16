@@ -1,0 +1,8 @@
+# Install torch/torchvision from the CUDA wheel index for the host driver first:
+# pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+stable-worldmodel[train,env,format]==0.1.1
+stable-pretraining==0.1.7
+lightning==2.6.6
+transformers==4.57.3
+datasets==3.3.2
+pyarrow==20.0.0
