@@ -19,6 +19,7 @@ class JEPA(nn.Module):
         flow_source_noise_scale=1.0,
         freeze_encoder=False,
         freeze_projector=False,
+        routing_credit=None,
     ):
         super().__init__()
 
@@ -39,6 +40,8 @@ class JEPA(nn.Module):
         )
         self._flow_seed = None
         self._flow_generators = {}
+        self.routing_credit = dict(routing_credit or {})
+        self._flow_graph_cache = {}
 
     def _validate_flow_configuration(self):
         if self.flow_source not in {
@@ -74,6 +77,8 @@ class JEPA(nn.Module):
 
     def train(self, mode=True):
         """Keep frozen visual modules and normalization statistics in eval mode."""
+        if mode:
+            self._flow_graph_cache.clear()
         super().train(mode)
         if getattr(self, "freeze_encoder", False):
             self.encoder.eval()
@@ -171,13 +176,17 @@ class JEPA(nn.Module):
         )
         return current_latent + source
 
-    def flow_loss(self, hist_emb, future_act_emb, target_emb):
+    def flow_loss(self, hist_emb, future_act_emb, target_emb, *,
+                  training_step=None, return_details=False):
         """
         Compute flow-matching loss for future latent prediction.
         hist_emb: (B, H, K, D)
         future_act_emb: (B, F, A_emb)
         target_emb: (B, P, K, D)
         """
+        routed = bool(getattr(self.predictor, "routing_enabled", False))
+        if routed and training_step is not None:
+            self.predictor.set_routing_step(int(training_step))
         noise = torch.randn_like(target_emb)
         flow_source = self._flow_source_from_noise(hist_emb, noise)
         t = torch.rand(target_emb.size(0), device=target_emb.device)
@@ -186,7 +195,93 @@ class JEPA(nn.Module):
         target_velocity = target_emb - flow_source
         pred_velocity = self.predictor(noisy_emb, hist_emb, future_act_emb, t)
         pred_velocity = self._apply_token_module(self.pred_proj, pred_velocity)
-        return F.mse_loss(pred_velocity, target_velocity)
+        pred_loss = F.mse_loss(pred_velocity, target_velocity)
+        if not return_details:
+            return pred_loss
+
+        credit_loss = pred_loss.new_zeros(())
+        metrics = {}
+        if routed and self.training and torch.is_grad_enabled():
+            trace = self.predictor.get_last_route_trace()
+            if trace:
+                usage = torch.stack([item["mask"].float().mean(0) for item in trace])
+                metrics.update({
+                    "route_batch_load_min": usage.min(),
+                    "route_batch_load_max": usage.max(),
+                    "route_load_ema_min": self.predictor.routing.load_ema.min(),
+                    "route_load_ema_max": self.predictor.routing.load_ema.max(),
+                })
+                credit_loss, credit_metrics = self._routing_credit_loss(
+                    noisy_emb, hist_emb, future_act_emb, t, target_velocity,
+                    trace, int(training_step or 0),
+                )
+                metrics.update(credit_metrics)
+        return {"pred_loss": pred_loss, "route_credit_loss": credit_loss,
+                "routing_metrics": metrics}
+
+    def _routing_credit_loss(self, noisy_emb, hist_emb, future_act_emb, t,
+                             target_velocity, trace, training_step):
+        """Matched stochastic swap probes supervise only the detached-input router.
+
+        Both probes freeze all other route weights and use identical dropout RNG.
+        The target/noise/time and the original encoder gradient paths are unchanged.
+        Forking RNG also prevents probes from changing subsequent training draws.
+        """
+        cfg = self.routing_credit
+        zero = target_velocity.new_zeros(())
+        metrics = {name: zero for name in (
+            "credit_probe_rate", "credit_valid_rate", "credit_swap_win_rate",
+            "credit_advantage_mean", "credit_advantage_abs", "credit_original_mse",
+        )}
+        routing = self.predictor.routing
+        interval = max(1, int(cfg.get("interval", 8)))
+        warmup = int(cfg.get("warmup_steps", 100))
+        if (not cfg.get("enabled", False) or routing.mode != "learned"
+                or training_step < warmup or training_step % interval != 0):
+            return zero, metrics
+
+        devices = [noisy_emb.device.index] if noisy_emb.is_cuda else []
+        # Includes swap sampling, so auxiliary probes consume no training RNG.
+        with torch.random.fork_rng(devices=devices), torch.no_grad():
+            swap = routing.make_swap(trace)
+            block, removed, added = swap
+            original_routes = routing.make_overrides(trace)
+            swapped_routes = routing.make_overrides(trace, swap=swap)
+            cpu_rng = torch.random.get_rng_state()
+            cuda_rng = torch.cuda.get_rng_state(noisy_emb.device) if devices else None
+            args = (noisy_emb.detach(), hist_emb.detach(),
+                    future_act_emb.detach(), t.detach())
+            original = self.predictor(*args, routing_overrides=original_routes,
+                                      routing_record=False)
+            original = self._apply_token_module(self.pred_proj, original)
+            torch.random.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state(cuda_rng, noisy_emb.device)
+            swapped = self.predictor(*args, routing_overrides=swapped_routes,
+                                     routing_record=False)
+            swapped = self._apply_token_module(self.pred_proj, swapped)
+            target = target_velocity.detach().float()
+            loss_original = (original.float() - target).square().flatten(1).mean(1)
+            loss_swapped = (swapped.float() - target).square().flatten(1).mean(1)
+            advantage = (loss_original - loss_swapped).detach()
+            threshold = float(cfg.get("min_margin", 1e-5))
+            threshold = threshold + float(cfg.get("relative_margin", 1e-3)) * loss_original
+            valid = advantage.abs() > threshold
+
+        scores = routing.rescore(block, trace[block]["inputs"].detach()).float()
+        margin = scores.gather(1, added[:, None]).squeeze(1)
+        margin = margin - scores.gather(1, removed[:, None]).squeeze(1)
+        losses = F.softplus(-advantage.sign() * margin)
+        credit_loss = (losses * valid).sum() / valid.sum().clamp_min(1)
+        metrics.update({
+            "credit_probe_rate": zero + 1,
+            "credit_valid_rate": valid.float().mean(),
+            "credit_swap_win_rate": (advantage > threshold).float().mean(),
+            "credit_advantage_mean": advantage.mean(),
+            "credit_advantage_abs": advantage.abs().mean(),
+            "credit_original_mse": loss_original.mean(),
+        })
+        return credit_loss, metrics
 
     def predict(self, hist_emb, future_act_emb, horizon=None, num_steps=None, noise=None):
         """Generate a future latent trajectory by Euler integration."""
@@ -212,6 +307,19 @@ class JEPA(nn.Module):
             )
         x = self._flow_source_from_noise(hist_emb, noise)
 
+        if (not getattr(self.predictor, "cuda_graph_enabled", False)
+                and self._flow_graph_cache):
+            self._flow_graph_cache.clear()
+        sparse_fp32_grouped = (
+            getattr(self.predictor, "sparse_compute", False)
+            and not torch.is_autocast_enabled("cuda")
+            and (not getattr(self.predictor, "share_route_inference", False)
+                 or x.size(0) == 1)
+        )
+        if (getattr(self.predictor, "cuda_graph_enabled", False)
+                and not self.training and x.is_cuda and not sparse_fp32_grouped):
+            return self._predict_flow_graph(x, hist_emb, future_act_emb, num_steps)
+
         dt = 1.0 / num_steps
         for step in range(num_steps):
             t = torch.full(
@@ -220,10 +328,51 @@ class JEPA(nn.Module):
                 device=hist_emb.device,
                 dtype=hist_emb.dtype,
             )
-            velocity = self.predictor(x, hist_emb, future_act_emb, t)
+            if getattr(self.predictor, "cuda_graph_enabled", False):
+                velocity = self.predictor.forward_inference(x, hist_emb, future_act_emb, t)
+            else:
+                velocity = self.predictor(x, hist_emb, future_act_emb, t)
             velocity = self._apply_token_module(self.pred_proj, velocity)
             x = x + dt * velocity
         return x
+
+    def _predict_flow_graph(self, source, hist_emb, future_act_emb, num_steps):
+        """Capture all Euler updates once for a fixed CEM candidate shape."""
+        key = (tuple(source.shape), tuple(hist_emb.shape),
+               tuple(future_act_emb.shape), source.dtype, hist_emb.dtype,
+               future_act_emb.dtype, num_steps, torch.is_autocast_enabled("cuda"))
+        cached = self._flow_graph_cache.get(key)
+
+        def integrate(state, history, actions):
+            dt = 1.0 / num_steps
+            for step in range(num_steps):
+                t = torch.full((state.size(0),), step / num_steps,
+                               device=state.device, dtype=state.dtype)
+                velocity = self.predictor(state, history, actions, t)
+                velocity = self._apply_token_module(self.pred_proj, velocity)
+                state = state + dt * velocity
+            return state
+
+        with torch.inference_mode():
+            if cached is None:
+                static = tuple(tensor.clone() for tensor in
+                               (source, hist_emb, future_act_emb))
+                warmup_stream = torch.cuda.Stream()
+                warmup_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(warmup_stream):
+                    for _ in range(3):
+                        integrate(*static)
+                torch.cuda.current_stream().wait_stream(warmup_stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = integrate(*static)
+                cached = (static, graph, output)
+                self._flow_graph_cache[key] = cached
+            static, graph, output = cached
+            for target, value in zip(static, (source, hist_emb, future_act_emb)):
+                target.copy_(value)
+            graph.replay()
+            return output.clone()
 
     ####################
     ## Inference only ##

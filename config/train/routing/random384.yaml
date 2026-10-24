@@ -1,0 +1,31 @@
+# @package _global_
+# Cube arm: use with data=ogb, global batch 4 x 32, twenty epochs.
+seed: 3072
+loss:
+  sigreg:
+    weight: 0.1
+model:
+  predictor:
+    hidden_dim: 384
+    routing:
+      enabled: true
+      mode: random
+      shared_dim: 128
+      group_size: 16
+      top_k: 8
+      router_hidden_dim: 128
+      warmup_steps: 100
+      balance_enabled: false
+      balance_ema: 0.99
+      balance_min_factor: 0.25
+      balance_max_factor: 1.5
+      bias_lr: 0.01
+      bias_clip: 2.0
+  routing_credit:
+    enabled: false
+    weight: 0.01
+    interval: 8
+    warmup_steps: 100
+    min_margin: 1.0e-5
+    relative_margin: 1.0e-3
+
