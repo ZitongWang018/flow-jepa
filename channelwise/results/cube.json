@@ -1,0 +1,52 @@
+{
+  "experiment": "Cube channelwise sparse336_active192",
+  "train": {
+    "epochs": 20,
+    "seed": 3072,
+    "global_batch": 128,
+    "gpus": 4
+  },
+  "architecture": {
+    "visual_latent_dim": 192,
+    "predictor_layers": 6,
+    "predictor_total_dim": 336,
+    "shared_dim": 144,
+    "dynamic_group_count": 4,
+    "dynamic_group_dim": 48,
+    "selected_dynamic_groups": 1,
+    "active_dim": 192,
+    "original_total_parameters": 23031236,
+    "channelwise_total_parameters": 39499148,
+    "channelwise_selected_path_parameters": 24655340
+  },
+  "evaluation": {
+    "task": "OGBench-Cube",
+    "starts": 50,
+    "seed": 42,
+    "cem_samples": 300,
+    "cem_iterations": 30,
+    "cem_topk": 30,
+    "euler_steps": 8,
+    "historical_original192": {"clean_successes": 28, "gaussian_successes": 18},
+    "channelwise_independent": {"clean_successes": 34, "gaussian_successes": 21},
+    "channelwise_shared_route": {"clean_successes": 34, "gaussian_successes": 22}
+  },
+  "predictor_latency_ms": {
+    "gpu": "RTX 4090",
+    "precision": "BF16",
+    "mode": "CUDA graph, 300 candidates, eight Euler calls",
+    "original192_random_weights": 12.766,
+    "channelwise_independent_final_checkpoint": 22.231,
+    "channelwise_shared_final_checkpoint": 16.171
+  },
+  "route_probe": {
+    "real_cube_starts": 20,
+    "route": "independent candidate",
+    "training_ema_min": 0.21973007917404175,
+    "training_ema_max": 0.27690258622169495,
+    "inference_layer_aggregate_min": 0.14267956744879484,
+    "inference_layer_aggregate_max": 0.3621825594455004,
+    "layer_6_euler_1_group_3_frequency": 0.9957937002182007,
+    "layer_6_euler_8_group_2_frequency": 1.0
+  }
+}

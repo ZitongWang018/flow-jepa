@@ -50,7 +50,7 @@ def main():
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.manual_seed(3072)
     with initialize_config_dir(config_dir=str(Path(__file__).resolve().parent / "config/train"), version_base=None):
-        arm = os.environ.get("ARM", "learned384")
+        arm = os.environ.get("ARM", "sparse336_active192")
         cfg = compose(config_name="fjepa", overrides=["data=ogb", f"+routing={arm}", "model.action_encoder.input_dim=25"])
     cfg.model.predictor.routing.warmup_steps = 0
     cfg.model.routing_credit.warmup_steps = 0

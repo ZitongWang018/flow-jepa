@@ -23,8 +23,6 @@ dataset:
 seed: 42
 flow_seed: ${seed}
 policy: random # ckpt name or random
-sparse_share_route: false
-cuda_graph_predictor: false
 
 perturbation:
   enabled: false

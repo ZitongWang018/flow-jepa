@@ -1,35 +1,11 @@
 import os
-import sys
-from pathlib import Path
 
 os.environ["MUJOCO_GL"] = "egl"
-
-# The Cube simulator needs EGL before importing MuJoCo. The original
-# evaluation used a user-space Mesa bundle beside the dataset; restore that
-# library search path when the bundle is present. Re-exec is necessary because
-# the ELF loader reads LD_LIBRARY_PATH at process startup.
-data_root = os.environ.get("LOCAL_DATASET_DIR")
-if data_root and os.environ.get("FLOW_JEPA_EGL_READY") != "1":
-    egl_root = Path(data_root) / "tools" / "egl-root"
-    library_dir = egl_root / "usr" / "lib" / "x86_64-linux-gnu"
-    if (library_dir / "libEGL.so.1").is_file():
-        environment = os.environ.copy()
-        environment["LD_LIBRARY_PATH"] = (
-            f"{library_dir}:{environment.get('LD_LIBRARY_PATH', '')}"
-        )
-        environment["__EGL_VENDOR_LIBRARY_DIRS"] = str(
-            egl_root / "usr" / "share" / "glvnd" / "egl_vendor.d"
-        )
-        environment["EGL_PLATFORM"] = "surfaceless"
-        environment["LIBGL_ALWAYS_SOFTWARE"] = "1"
-        environment["GALLIUM_DRIVER"] = "llvmpipe"
-        environment["LIBGL_DRIVERS_PATH"] = str(library_dir / "dri")
-        environment["FLOW_JEPA_EGL_READY"] = "1"
-        os.execvpe(sys.executable, [sys.executable, *sys.argv], environment)
 
 import time
 from collections import defaultdict
 from copy import deepcopy
+from pathlib import Path
 
 import hydra
 import numpy as np
@@ -209,10 +185,6 @@ def run(cfg: DictConfig):
         model.requires_grad_(False)
         model.interpolate_pos_encoding = True
         model.set_flow_seed(cfg.flow_seed)
-        if getattr(model.predictor, "sparse_compute", False):
-            model.predictor.share_route_inference = bool(cfg.get("sparse_share_route", False))
-            if bool(cfg.get("cuda_graph_predictor", False)):
-                model.predictor.enable_cuda_graph(True)
         plan_config = swm.PlanConfig(**cfg.plan_config)
         solver = hydra.utils.instantiate(cfg.solver, model=model)
         policy = swm.policy.WorldModelPolicy(
