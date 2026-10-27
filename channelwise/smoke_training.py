@@ -60,7 +60,7 @@ def main():
              router_hidden_dim=16, warmup_steps=0)
     )
     predictor = FlowTrajectoryPredictor(
-        depth=3, heads=2, mlp_dim=64, input_dim=12,
+        depth=6, heads=2, mlp_dim=64, input_dim=12,
         hidden_dim=28 if args.sparse else 48,
         action_dim=12, output_dim=12, output_proj_hidden_dim=48,
         dim_head=8, dropout=0.1, causal_self_attention=False,
@@ -230,6 +230,17 @@ def main():
         original_prediction = model.predict(history.detach(), action.detach(), num_steps=2, noise=noise)
         reloaded_prediction = reloaded.predict(history.detach(), action.detach(), num_steps=2, noise=noise)
     assert torch.equal(original_prediction, reloaded_prediction)
+    # Each credit probe must supervise a different block, even when the CPU
+    # RNG is unchanged between probes (the usual CUDA training case).
+    model.train()
+    probe_layers = []
+    for probe_step in range(routing.depth):
+        probe = model.flow_loss(
+            history.detach(), action.detach(), target.detach(),
+            training_step=probe_step, return_details=True,
+        )
+        probe_layers.append(int(probe["routing_metrics"]["credit_probe_layer"]))
+    assert probe_layers == list(range(1, routing.depth + 1)), probe_layers
     print(json.dumps(dict(
         status="passed", device=str(device), rank=rank, ddp_steps=ddp_steps,
         sparse=args.sparse,
@@ -237,6 +248,7 @@ def main():
         credit_loss=float(result["route_credit_loss"].detach()),
         credit_router_gradient_l1=router_norm,
         probe_valid_rate=float(result["routing_metrics"]["credit_valid_rate"]),
+        credit_probe_layers=probe_layers,
         main_target_gradient_preserved=True,
         probe_buffers_and_replay_verified=True,
         checkpoint_reload_verified=True,
@@ -248,3 +260,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

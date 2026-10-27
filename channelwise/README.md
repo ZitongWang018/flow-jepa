@@ -27,6 +27,14 @@ a matched selected/unselected swap supplies an additional router ranking loss
 with weight 0.01. The exact settings are in
 [`config/train/routing/sparse336_active192.yaml`](config/train/routing/sparse336_active192.yaml).
 
+The swap probe runs on one predictor layer every eight optimizer steps. It now
+cycles through layers 1-6; `train/credit_probe_layer` records the selected
+layer (0 on steps without a probe). The reported epoch-20 checkpoint and task
+scores below predate this correction: its ordinary prediction loss updated all
+six layers, while swap-probe supervision could repeatedly target one layer.
+The corrected training schedule has passed a six-layer synthetic check but has
+not been retrained or reevaluated on Cube.
+
 ## Run
 
 Use Python 3.10 with a compatible CUDA PyTorch installation and install
@@ -122,3 +130,4 @@ This work extends [Flow-JEPA](https://github.com/HuoYanchen/Flow-JEPA), using
 its model and Cube evaluation protocol. The original source revision for the
 baseline is `ab73e7c50435e3a1fffb4d3f6d175445e57a2f4e`. See the repository
 license for the inherited source.
+

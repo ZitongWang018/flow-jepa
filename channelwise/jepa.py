@@ -232,6 +232,7 @@ class JEPA(nn.Module):
         metrics = {name: zero for name in (
             "credit_probe_rate", "credit_valid_rate", "credit_swap_win_rate",
             "credit_advantage_mean", "credit_advantage_abs", "credit_original_mse",
+            "credit_probe_layer",
         )}
         routing = self.predictor.routing
         interval = max(1, int(cfg.get("interval", 8)))
@@ -241,9 +242,13 @@ class JEPA(nn.Module):
             return zero, metrics
 
         devices = [noisy_emb.device.index] if noisy_emb.is_cuda else []
+        # A CPU randint inside fork_rng can select the same block repeatedly
+        # when the normal training step only advances the CUDA RNG. Cycle the
+        # probed block so all six routers receive matched-swap supervision.
+        probe_block = (training_step // interval) % routing.depth
         # Includes swap sampling, so auxiliary probes consume no training RNG.
         with torch.random.fork_rng(devices=devices), torch.no_grad():
-            swap = routing.make_swap(trace)
+            swap = routing.make_swap(trace, block=probe_block)
             block, removed, added = swap
             original_routes = routing.make_overrides(trace)
             swapped_routes = routing.make_overrides(trace, swap=swap)
@@ -275,6 +280,7 @@ class JEPA(nn.Module):
         credit_loss = (losses * valid).sum() / valid.sum().clamp_min(1)
         metrics.update({
             "credit_probe_rate": zero + 1,
+            "credit_probe_layer": zero + block + 1,
             "credit_valid_rate": valid.float().mean(),
             "credit_swap_win_rate": (advantage > threshold).float().mean(),
             "credit_advantage_mean": advantage.mean(),
@@ -449,3 +455,4 @@ class JEPA(nn.Module):
         cost = self.criterion(info_dict)
         
         return cost
+
