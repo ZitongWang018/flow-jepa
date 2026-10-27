@@ -30,8 +30,10 @@ with weight 0.01. The exact settings are in
 The swap probe runs on one predictor layer every eight optimizer steps. It now
 cycles through layers 1-6; `train/credit_probe_layer` records the selected
 layer (0 on steps without a probe). The reported epoch-20 checkpoint and task
-scores below predate this correction: its ordinary prediction loss updated all
-six layers, while swap-probe supervision could repeatedly target one layer.
+scores below predate this correction. Ordinary prediction loss updated all six
+predictor blocks, but binary top-1 selection gave no gradient to the router
+scores; repeated swap probes could therefore leave five routers without that
+ranking supervision.
 The corrected training schedule has passed a six-layer synthetic check but has
 not been retrained or reevaluated on Cube.
 
